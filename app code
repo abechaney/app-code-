@@ -1,0 +1,150 @@
+import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart'; // Android-only geocoding
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:math';
+
+void main() => runApp(ActivitySuggestorApp());
+
+class ActivitySuggestorApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Offline Adventures (Android)',
+      theme: ThemeData(
+        primarySwatch: Colors.deepPurple, // Material Design color
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+      ),
+      home: HomeScreen(),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  String _activity = "Tap the button to find something fun!";
+  String _address = "";
+  bool _isLoading = false;
+  double? _lat, _lng;
+
+  // Get location and suggest activity
+  Future<void> _suggestActivity() async {
+    setState(() => _isLoading = true);
+
+    try {
+      // 1. Check and request location permissions
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        throw Exception("Location services are disabled.");
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          throw Exception("Location permissions denied");
+        }
+      }
+
+      // 2. Fetch current location
+      Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high);
+      setState(() {
+        _lat = position.latitude;
+        _lng = position.longitude;
+      });
+
+      // 3. Convert coordinates to address (Android-only)
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+          position.latitude, position.longitude);
+      if (placemarks.isNotEmpty) {
+        Placemark place = placemarks.first;
+        setState(() {
+          _address = "${place.street}, ${place.locality}";
+        });
+      }
+
+      // 4. Fetch nearby places (Google Places API)
+      final String apiKey = "YOUR_GOOGLE_API_KEY"; // Replace this!
+      final String url =
+          "https://maps.googleapis.com/maps/api/place/nearbysearch/json?"
+          "location=${_lat},${_lng}&radius=1000"
+          "&type=park|museum|cafe|library|book_store"
+          "&key=$apiKey";
+
+      final response = await http.get(Uri.parse(url));
+      final data = json.decode(response.body);
+
+      // 5. Pick a random place
+      if (data['results'].isNotEmpty) {
+        Random random = Random();
+        var place = data['results'][random.nextInt(data['results'].length)];
+        setState(() {
+          _activity = "Try this:\n${place['name']}\n"
+                      "(${place['types']?.first ?? 'Activity'})";
+        });
+      } else {
+        setState(() => _activity = "No places found. How about a walk?");
+      }
+    } catch (e) {
+      setState(() => _activity = "Error: ${e.toString()}");
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Offline Adventures"),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Card(
+              elevation: 4,
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Text(
+                      _activity,
+                      style: TextStyle(fontSize: 18),
+                      textAlign: TextAlign.center,
+                    ),
+                    if (_address.isNotEmpty)
+                      Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          "📍 $_address",
+                          style: TextStyle(color: Colors.grey[600]),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            SizedBox(height: 20),
+            ElevatedButton.icon(
+              icon: Icon(Icons.explore),
+              label: Text(_isLoading ? "Searching..." : "Suggest Activity"),
+              onPressed: _isLoading ? null : _suggestActivity,
+              style: ElevatedButton.styleFrom(
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
