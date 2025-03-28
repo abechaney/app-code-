@@ -1,0 +1,177 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:geolocator_web/geolocator_web.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:math';
+
+Future<void> main() async {
+  await dotenv.load();
+  runApp(ActivitySuggestorWebApp());
+}
+
+class ActivitySuggestorWebApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Offline Activities Web',
+      theme: ThemeData(
+        primarySwatch: Colors.indigo,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+      ),
+      home: ActivitySuggestionPage(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class ActivitySuggestionPage extends StatefulWidget {
+  @override
+  _ActivitySuggestionPageState createState() => _ActivitySuggestionPageState();
+}
+
+class _ActivitySuggestionPageState extends State<ActivitySuggestionPage> {
+  String _suggestion = "Click below to find something fun near you!";
+  String _currentLocation = "";
+  bool _isLoading = false;
+  double? _latitude;
+  double? _longitude;
+
+  Future<void> _getLocationAndSuggestActivity() async {
+    setState(() {
+      _isLoading = true;
+      _suggestion = "Finding your location...";
+    });
+
+    try {
+      // Get current position using web geolocation
+      final position = await GeolocatorWeb.getCurrentPosition();
+      setState(() {
+        _latitude = position.latitude;
+        _longitude = position.longitude;
+      });
+
+      // Get nearby places using Google Places API
+      final apiKey = dotenv.env['GOOGLE_API_KEY'];
+      final radius = 1500; // meters
+      final types = 'park,museum,cafe,library,book_store';
+      
+      final response = await http.get(
+        Uri.parse(
+          'https://maps.googleapis.com/maps/api/place/nearbysearch/json?'
+          'location=$_latitude,$_longitude'
+          '&radius=$radius'
+          '&type=$types'
+          '&key=$apiKey'
+        ),
+      );
+
+      final data = json.decode(response.body);
+
+      if (data['results'].isNotEmpty) {
+        final random = Random();
+        final place = data['results'][random.nextInt(data['results'].length)];
+        
+        // Get readable address
+        final addressResponse = await http.get(
+          Uri.parse(
+            'https://maps.googleapis.com/maps/api/geocode/json?'
+            'latlng=$_latitude,$_longitude'
+            '&key=$apiKey'
+          ),
+        );
+        
+        final addressData = json.decode(addressResponse.body);
+        final address = addressData['results'].isNotEmpty 
+            ? addressData['results'][0]['formatted_address'] 
+            : 'Nearby';
+
+        setState(() {
+          _currentLocation = address;
+          _suggestion = "Why not visit ${place['name']}?\n"
+                       "${place['vicinity'] ?? ''}";
+        });
+      } else {
+        setState(() {
+          _suggestion = "No nearby activities found. How about a walk outside?";
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _suggestion = "Couldn't get location. Please enable location services "
+                     "and try again. Error: ${e.toString()}";
+      });
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Offline Activity Finder'),
+        centerTitle: true,
+      ),
+      body: Center(
+        child: Container(
+          constraints: BoxConstraints(maxWidth: 600),
+          padding: EdgeInsets.all(20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Card(
+                elevation: 4,
+                child: Padding(
+                  padding: EdgeInsets.all(20),
+                  child: Column(
+                    children: [
+                      Icon(Icons.explore, size: 50, color: Colors.indigo),
+                      SizedBox(height: 20),
+                      Text(
+                        _suggestion,
+                        style: TextStyle(fontSize: 18),
+                        textAlign: TextAlign.center,
+                      ),
+                      if (_currentLocation.isNotEmpty) ...[
+                        SizedBox(height: 15),
+                        Text(
+                          '📍 $_currentLocation',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[600],
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(height: 30),
+              ElevatedButton(
+                onPressed: _isLoading ? null : _getLocationAndSuggestActivity,
+                style: ElevatedButton.styleFrom(
+                  padding: EdgeInsets.symmetric(horizontal: 30, vertical: 15),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: _isLoading
+                    ? SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(Colors.white),
+                        ),
+                      )
+                    : Text('Find Nearby Activity'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
