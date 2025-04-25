@@ -1,0 +1,275 @@
+import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter/foundation.dart' show kIsWeb;
+
+// Separate service class for location-related operations
+class LocationService {
+  static Future<Position> getCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      throw LocationServiceException('Location services are disabled.');
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        throw LocationServiceException('Location permissions denied');
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      throw LocationServiceException(
+          'Location permissions are permanently denied.');
+    }
+
+    return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.best);
+  }
+
+  static Future<String?> getAddressFromCoordinates(
+      double lat, double lng) async {
+    if (kIsWeb) {
+      // Web doesn't support geocoding package, use alternative
+      return await _getAddressFromCoordinatesWeb(lat, lng);
+    }
+
+    try {
+      // Use dynamic imports for platform-specific packages
+      final geocoding = await importGeocodingPackage();
+      List<Placemark> placemarks =
+          await geocoding.placemarkFromCoordinates(lat, lng);
+      if (placemarks.isNotEmpty) {
+        Placemark place = placemarks.first;
+        return "${place.street}, ${place.locality}";
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Geocoding error: $e');
+      return null;
+    }
+  }
+
+  static Future<dynamic> importGeocodingPackage() async {
+    if (kIsWeb) return null;
+    return await import('package:geocoding/geocoding.dart');
+  }
+
+  static Future<String?> _getAddressFromCoordinatesWeb(
+      double lat, double lng) async {
+    // Implement web-specific geocoding (e.g., using Google Maps API)
+    return null;
+  }
+}
+
+class LocationServiceException implements Exception {
+  final String message;
+  LocationServiceException(this.message);
+
+  @override
+  String toString() => 'LocationServiceException: $message';
+}
+
+// Separate service class for Place API operations
+class PlaceService {
+  static const String _baseUrl =
+      'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
+  final String apiKey;
+
+  PlaceService(this.apiKey);
+
+  Future<Map<String, dynamic>?> getNearbyPlaces(
+      double lat, double lng) async {
+    try {
+      final response = await http.get(Uri.parse(
+          '$_baseUrl?location=$lat,$lng&radius=1000&type=park|museum|cafe|library|book_store&key=$apiKey'));
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else {
+        throw PlaceServiceException(
+            'API request failed with status ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Place API error: $e');
+      throw PlaceServiceException('Failed to fetch places: ${e.toString()}');
+    }
+  }
+}
+
+class PlaceServiceException implements Exception {
+  final String message;
+  PlaceServiceException(this.message);
+
+  @override
+  String toString() => 'PlaceServiceException: $message';
+}
+
+void main() {
+  // Initialize with your API key (in production, use environment variables)
+  const googleApiKey = String.fromEnvironment('GOOGLE_API_KEY');
+  final placeService = PlaceService(googleApiKey);
+
+  runApp(ActivitySuggestorApp(placeService: placeService));
+}
+
+class ActivitySuggestorApp extends StatelessWidget {
+  final PlaceService placeService;
+
+  const ActivitySuggestorApp({Key? key, required this.placeService})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Offline Adventures',
+      theme: ThemeData(
+        primarySwatch: Colors.deepPurple,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+      ),
+      home: HomeScreen(placeService: placeService),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  final PlaceService placeService;
+
+  const HomeScreen({Key? key, required this.placeService}) : super(key: key);
+
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  String _activity = "Tap the button to find something fun!";
+  String _address = "";
+  bool _isLoading = false;
+  double? _lat, _lng;
+
+  Future<void> _suggestActivity() async {
+    setState(() {
+      _isLoading = true;
+      _activity = "Finding something fun...";
+      _address = "";
+    });
+
+    try {
+      // Get current location
+      final position = await LocationService.getCurrentLocation();
+      setState(() {
+        _lat = position.latitude;
+        _lng = position.longitude;
+      });
+
+      // Get address
+      final address = await LocationService.getAddressFromCoordinates(
+          position.latitude, position.longitude);
+      if (address != null) {
+        setState(() => _address = address);
+      }
+
+      // Get nearby places
+      final placesData = await widget.placeService.getNearbyPlaces(
+          position.latitude, position.longitude);
+
+      if (placesData?['results'] != null && placesData!['results'].isNotEmpty) {
+        final random = Random();
+        final place =
+            placesData['results'][random.nextInt(placesData['results'].length)];
+        
+        final placeTypes = (place['types'] as List<dynamic>?)?.join(', ') ?? 'activity';
+        final distance = place['geometry'] != null
+            ? _calculateDistance(
+                position.latitude,
+                position.longitude,
+                place['geometry']['location']['lat'],
+                place['geometry']['location']['lng'])
+            : null;
+
+        setState(() {
+          _activity = "Try this:\n${place['name']}\n"
+              "(${placeTypes.capitalize()})${distance != null ? '\n${distance.toStringAsFixed(1)} km away' : ''}";
+        });
+      } else {
+        setState(() => _activity = "No specific places found nearby. How about exploring a new neighborhood or taking a walk in your area?");
+      }
+    } on LocationServiceException catch (e) {
+      setState(() => _activity = "Location error: ${e.message}");
+    } on PlaceServiceException catch (e) {
+      setState(() => _activity = "Couldn't fetch suggestions: ${e.message}");
+    } catch (e) {
+      setState(() => _activity = "Something went wrong. Please try again.");
+      debugPrint('Error in _suggestActivity: $e');
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const p = 0.017453292519943295; // Math.PI / 180
+    final a = 0.5 -
+        cos((lat2 - lat1) * p) / 2 +
+        cos(lat1 * p) * cos(lat2 * p) * (1 - cos((lon2 - lon1) * p)) / 2;
+    return 12742 * asin(sqrt(a)); // 2 * R; R = 6371 km
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Offline Adventures"),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Card(
+              elevation: 4,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Text(
+                      _activity,
+                      style: const TextStyle(fontSize: 18),
+                      textAlign: TextAlign.center,
+                    ),
+                    if (_address.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          "📍 $_address",
+                          style: TextStyle(color: Colors.grey[600]),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.explore),
+              label: Text(_isLoading ? "Searching..." : "Suggest Activity"),
+              onPressed: _isLoading ? null : _suggestActivity,
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+extension StringExtension on String {
+  String capitalize() {
+    return "${this[0].toUpperCase()}${substring(1)}";
+  }
+}
